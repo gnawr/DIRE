@@ -16,6 +16,7 @@ import torchvision.transforms as transforms
 import numpy as np
 import torch as th
 import torch.distributed as dist
+import pdb
 
 from guided_diffusion import dist_util, logger
 from guided_diffusion.image_datasets import load_data_for_reverse
@@ -42,7 +43,7 @@ def reshape_image(imgs: torch.Tensor, image_size: int) -> torch.Tensor:
 def main():
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist(os.environ["CUDA_VISIBLE_DEVICES"])
+    # dist_util.setup_dist(os.environ["CUDA_VISIBLE_DEVICES"])
     logger.configure(dir=args.recons_dir)
 
     os.makedirs(args.recons_dir, exist_ok=True)
@@ -60,11 +61,13 @@ def main():
     data = load_data_for_reverse(
         data_dir=args.images_dir, batch_size=args.batch_size, image_size=args.image_size, class_cond=args.class_cond
     )
+    print("data: ", args.images_dir)
     logger.log("have created data loader")
 
     logger.log("computing recons & DIRE ...")
     have_finished_images = 0
     while have_finished_images < args.num_samples:
+        logger.log("starting loop")
         if (have_finished_images + MPI.COMM_WORLD.size * args.batch_size) > args.num_samples and (
             args.num_samples - have_finished_images
         ) % MPI.COMM_WORLD.size == 0:
@@ -73,9 +76,15 @@ def main():
             batch_size = args.batch_size
         all_images = []
         all_labels = []
+        print("set batch size")
+        logger.log("set batch size log data")
+
         imgs, out_dicts, paths = next(data)
+        print("next data")
+        logger.log("log next data")
         imgs = imgs[:batch_size]
         paths = paths[:batch_size]
+        logger.log("0000")
 
         imgs = imgs.to(dist_util.dev())
         model_kwargs = {}
@@ -84,7 +93,8 @@ def main():
             model_kwargs["y"] = classes
         reverse_fn = diffusion.ddim_reverse_sample_loop
         imgs = reshape_image(imgs, args.image_size)
-
+        logger.log("1111")
+        # pdb.set_trace()
         latent = reverse_fn(
             model,
             (batch_size, 3, args.image_size, args.image_size),
@@ -92,7 +102,10 @@ def main():
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
             real_step=args.real_step,
+            progress=True
         )
+        logger.log("reverse fn")
+
         sample_fn = diffusion.p_sample_loop if not args.use_ddim else diffusion.ddim_sample_loop
         recons = sample_fn(
             model,
@@ -107,6 +120,7 @@ def main():
         recons = ((recons + 1) * 127.5).clamp(0, 255).to(th.uint8)
         recons = recons.permute(0, 2, 3, 1)
         recons = recons.contiguous()
+        logger.log("recons")
 
         imgs = ((imgs + 1) * 127.5).clamp(0, 255).to(th.uint8)
         imgs = imgs.permute(0, 2, 3, 1)
@@ -115,7 +129,7 @@ def main():
         dire = (dire * 255.0 / 2.0).clamp(0, 255).to(th.uint8)
         dire = dire.permute(0, 2, 3, 1)
         dire = dire.contiguous()
-
+        logger.log("here")
         gathered_samples = [th.zeros_like(recons) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, recons)  # gather not supported with NCCL
 
@@ -125,6 +139,8 @@ def main():
             dist.all_gather(gathered_labels, classes)
             all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
         have_finished_images += len(all_images) * batch_size
+        logger.log("2222")
+
         # print(th.mean(res.float()))
         recons = recons.cpu().numpy()
         for i in range(len(recons)):
